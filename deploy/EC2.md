@@ -14,6 +14,17 @@ This repository now runs Next.js behind Nginx and stores its application state i
    sudo bash scripts/deploy-ec2.sh
    ```
 
+### Using DuckDNS
+
+DuckDNS domains work with the installer's Certbot step. The script uses Certbot's Nginx plugin with the HTTP-01 challenge, so no DuckDNS token or TXT record is needed for certificate issuance.
+
+1. In DuckDNS, create a hostname such as `my-shein-test.duckdns.org` and set its IPv4 address to the EC2 instance's public IPv4. An Elastic IP keeps that address stable across stop/start cycles; otherwise update the DuckDNS record whenever the public IP changes.
+2. Allow inbound TCP 80 and 443 in the EC2 security group. HTTP-01 validation reaches the hostname over port 80.
+3. Before running the installer, check that `nslookup my-shein-test.duckdns.org` returns the EC2 public IPv4.
+4. At the installer prompt, enter `my-shein-test.duckdns.org` exactly as the hostname. Do not include `https://` or a trailing slash. Enter an email address for Let's Encrypt when prompted.
+
+After Certbot succeeds, open `https://my-shein-test.duckdns.org`. Certbot's installed timer renews the certificate automatically; check it with `sudo certbot renew --dry-run`.
+
 The installer installs Node.js 22, PostgreSQL, Nginx, and Certbot; creates a restricted PostgreSQL role; builds the app; configures Nginx and HTTPS; and creates an admin account with a password entered without echoing it to the terminal.
 
 Google sign-in is optional. If enabled, set a Google OAuth Web Client ID in the installer and add the deployed `https://your-domain` origin to that OAuth client's authorized JavaScript origins.
