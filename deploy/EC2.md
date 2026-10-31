@@ -1,11 +1,11 @@
 # EC2 deployment
 
-This repository now runs Next.js behind Nginx and stores its application state in a local PostgreSQL database. PostgreSQL listens on `127.0.0.1:5432`; Next.js listens on `127.0.0.1:3000`. Nginx is the public entry point on ports 80 and 443.
+This repository runs Next.js behind Nginx and stores its application state in a local PostgreSQL database. PostgreSQL listens on `127.0.0.1:5432`, Next.js listens on `127.0.0.1:3000`, and Nginx serves the app over plain HTTP on port `80`.
 
 ## Before running the installer
 
-1. Launch an Ubuntu EC2 instance with enough disk space for the repository and PostgreSQL. Add an EC2 security group rule for SSH from your own IP and HTTP/HTTPS (80 and 443) from the internet. Do not expose port 5432.
-2. Create a DNS A record for your domain pointing at the instance's public IP. The installer obtains a Let's Encrypt certificate, so DNS must already resolve to the instance.
+1. Launch an Ubuntu EC2 instance with enough disk space for the repository and PostgreSQL. In its security group, allow SSH from your own IP and inbound TCP `80` from the internet. Do not expose port `5432`.
+2. Find the instance's public IPv4 address. An Elastic IP keeps it stable when the instance stops and starts.
 3. Clone the repository and run the installer from its root:
 
    ```bash
@@ -14,26 +14,20 @@ This repository now runs Next.js behind Nginx and stores its application state i
    sudo bash scripts/deploy-ec2.sh
    ```
 
-### Using DuckDNS
+4. At the first prompt, enter the EC2 public IPv4 address (for example `18.222.10.20`). The script also accepts a domain name or a URL such as `http://18.222.10.20`.
+5. When deployment finishes, open `http://<EC2-public-IPv4>`.
 
-DuckDNS domains work with the installer's Certbot step. The script uses Certbot's Nginx plugin with the HTTP-01 challenge, so no DuckDNS token or TXT record is needed for certificate issuance.
+The installer installs Node.js 22, PostgreSQL, and Nginx; creates a restricted PostgreSQL role; builds and starts the app; and creates an admin account with a password entered without echoing it to the terminal. It does not install Certbot or configure HTTPS.
 
-1. In DuckDNS, create a hostname such as `my-shein-test.duckdns.org` and set its IPv4 address to the EC2 instance's public IPv4. An Elastic IP keeps that address stable across stop/start cycles; otherwise update the DuckDNS record whenever the public IP changes.
-2. Allow inbound TCP 80 and 443 in the EC2 security group. HTTP-01 validation reaches the hostname over port 80.
-3. Before running the installer, check that `nslookup my-shein-test.duckdns.org` returns the EC2 public IPv4.
-4. At the installer prompt, enter `my-shein-test.duckdns.org` as the hostname. The script also strips an accidental `http://` or `https://` prefix and trailing path. Enter an email address for Let's Encrypt when prompted.
+### HTTP login behavior
 
-After Certbot succeeds, open `https://my-shein-test.duckdns.org`. Certbot's installed timer renews the certificate automatically; check it with `sudo certbot renew --dry-run`.
-
-The installer installs Node.js 22, PostgreSQL, Nginx, and Certbot; creates a restricted PostgreSQL role; builds the app; configures Nginx and HTTPS; and creates an admin account with a password entered without echoing it to the terminal.
-
-Google sign-in is optional. If enabled, set a Google OAuth Web Client ID in the installer and add the deployed `https://your-domain` origin to that OAuth client's authorized JavaScript origins.
+The EC2 installer sets `SESSION_COOKIE_SECURE=false` so session cookies work over HTTP. HTTP does not encrypt login passwords or session cookies in transit, so use this setup for testing and avoid using a password you use elsewhere. Google sign-in may also be unavailable from a public IP over HTTP; leave the Google Client ID blank in the installer if you are using this HTTP-only setup.
 
 ## Moving data from Supabase
 
 When asked, choose the one-time migration and enter the existing Supabase project URL and its `service_role` key. The key is used only by the migration process and is not saved in the app's environment file. The migration imports the `users` and `orders` tables, including the order metadata stored in `payment._orderMeta`. It keeps the settings present in the repository's `data/db.json`. Shipments were not stored in Supabase by this codebase, so the new database starts with no shipments.
 
-If you skip the migration, the app starts with empty users, orders, and shipments. The installer still creates the new admin account. Regular visitors can then register or sign in with Google.
+If you skip the migration, the app starts with empty users, orders, and shipments. The installer still creates the new admin account. Regular visitors can then register or sign in with email and password.
 
 ## Operations
 

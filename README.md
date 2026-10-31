@@ -39,4 +39,4 @@ Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/bui
 
 ## Self-hosted EC2 deployment
 
-See [deploy/EC2.md](deploy/EC2.md) for Ubuntu setup, PostgreSQL migration, Nginx, HTTPS, and admin account instructions. Run `sudo bash scripts/deploy-ec2.sh` from the cloned repository on the EC2 instance.
+See [deploy/EC2.md](deploy/EC2.md) for Ubuntu setup, PostgreSQL migration, Nginx, and admin account instructions. Run `sudo bash scripts/deploy-ec2.sh` from the cloned repository on the EC2 instance; the site will be served over HTTP on the EC2 public IP.

@@ -6,6 +6,8 @@ const SALT_ROUNDS = 10;
 
 export const SESSION_COOKIE_NAME = 'shein_session';
 const DEVELOPMENT_SESSION_SECRET = 'local-development-session-secret-change-before-deploy';
+const SESSION_COOKIE_SECURE = process.env.SESSION_COOKIE_SECURE === 'true'
+  || (process.env.SESSION_COOKIE_SECURE !== 'false' && process.env.NODE_ENV === 'production');
 
 function getSessionSecret(): string {
   const configured = process.env.SESSION_SECRET;
@@ -207,7 +209,7 @@ export function setSessionCookie(res: NextResponse, token: string, maxAge = 7 * 
     name: SESSION_COOKIE_NAME,
     value: token,
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    secure: SESSION_COOKIE_SECURE,
     sameSite: 'lax',
     path: '/',
     maxAge,
@@ -222,7 +224,7 @@ export function clearSessionCookie(res: NextResponse): void {
     name: SESSION_COOKIE_NAME,
     value: '',
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    secure: SESSION_COOKIE_SECURE,
     sameSite: 'lax',
     path: '/',
     maxAge: 0,

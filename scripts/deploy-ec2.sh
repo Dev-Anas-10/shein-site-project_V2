@@ -14,26 +14,33 @@ DB_USER="shein_app"
 SERVICE_NAME="shein-concierge"
 NGINX_SITE="/etc/nginx/sites-available/${SERVICE_NAME}"
 
-read -r -p "Domain name for this app (DNS A record must point to this EC2): " APP_DOMAIN
-# Accept either a bare hostname or a pasted URL, and remove accidental spaces.
-APP_DOMAIN="${APP_DOMAIN#"${APP_DOMAIN%%[![:space:]]*}"}"
-APP_DOMAIN="${APP_DOMAIN%"${APP_DOMAIN##*[![:space:]]}"}"
-case "${APP_DOMAIN,,}" in
-  http://*) APP_DOMAIN="${APP_DOMAIN:7}" ;;
-  https://*) APP_DOMAIN="${APP_DOMAIN:8}" ;;
+read -r -p "EC2 public IPv4 address (or domain name): " APP_HOST
+# Accept a bare host or pasted URL, and remove accidental spaces.
+APP_HOST="${APP_HOST#"${APP_HOST%%[![:space:]]*}"}"
+APP_HOST="${APP_HOST%"${APP_HOST##*[![:space:]]}"}"
+case "${APP_HOST,,}" in
+  http://*) APP_HOST="${APP_HOST:7}" ;;
+  https://*) APP_HOST="${APP_HOST:8}" ;;
 esac
-APP_DOMAIN="${APP_DOMAIN%%/*}"
-if [[ ! "${APP_DOMAIN}" =~ ^[A-Za-z0-9.-]+$ ]]; then
-  echo "Enter a domain such as shop.example.com, optionally prefixed with http:// or https://. HTTPS is required for secure login cookies." >&2
+APP_HOST="${APP_HOST%%/*}"
+if [[ "${APP_HOST}" =~ ^[0-9.]+$ ]]; then
+  IFS='.' read -r -a IP_OCTETS <<< "${APP_HOST}"
+  if [[ "${#IP_OCTETS[@]}" -ne 4 ]]; then
+    echo "Enter a valid EC2 public IPv4 address or a domain name." >&2
+    exit 1
+  fi
+  for octet in "${IP_OCTETS[@]}"; do
+    if [[ ! "${octet}" =~ ^[0-9]{1,3}$ ]] || ((10#${octet} > 255)); then
+      echo "Enter a valid EC2 public IPv4 address or a domain name." >&2
+      exit 1
+    fi
+  done
+elif [[ ! "${APP_HOST}" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]]; then
+  echo "Enter a valid EC2 public IPv4 address or a domain name, optionally prefixed with http:// or https://." >&2
   exit 1
 fi
-echo "Using domain: ${APP_DOMAIN}"
+echo "Using host: ${APP_HOST}"
 read -r -p "Google OAuth Web Client ID (leave blank to disable Google sign-in): " GOOGLE_CLIENT_ID
-read -r -p "Email address for the HTTPS certificate: " CERT_EMAIL
-if [[ ! "${CERT_EMAIL}" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]; then
-  echo "Enter a valid email address for Let's Encrypt." >&2
-  exit 1
-fi
 
 EXISTING_PGPASSWORD=""
 EXISTING_SESSION_SECRET=""
@@ -51,7 +58,7 @@ systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ca-certificates curl gnupg git rsync openssl nginx postgresql postgresql-contrib certbot python3-certbot-nginx
+apt-get install -y ca-certificates curl gnupg git rsync openssl nginx postgresql postgresql-contrib
 
 install -d -m 0755 /etc/apt/keyrings
 curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
@@ -104,6 +111,7 @@ PGUSER=${DB_USER}
 PGPASSWORD=${DB_PASSWORD}
 PGPOOL_MAX=10
 SESSION_SECRET=${SESSION_SECRET}
+SESSION_COOKIE_SECURE=false
 NEXT_PUBLIC_GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
 EOF
 chown root:root "${APP_DIR}/.env.production"
@@ -170,16 +178,13 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
 
-sed "s/__SERVER_NAME__/${APP_DOMAIN}/g" "${APP_DIR}/deploy/nginx/shein-concierge.conf" \
+sed "s/__SERVER_NAME__/${APP_HOST}/g" "${APP_DIR}/deploy/nginx/shein-concierge.conf" \
   > "${NGINX_SITE}"
 ln -sfn "${NGINX_SITE}" "/etc/nginx/sites-enabled/${SERVICE_NAME}"
 rm -f /etc/nginx/sites-enabled/default
 nginx -t
 systemctl enable nginx
 systemctl reload nginx || systemctl start nginx
-
-certbot --nginx --non-interactive --agree-tos --redirect \
-  --email "${CERT_EMAIL}" -d "${APP_DOMAIN}"
 
 systemctl daemon-reload
 systemctl enable --now "${SERVICE_NAME}"
@@ -198,7 +203,7 @@ if ! curl --fail --silent http://127.0.0.1:3000/ >/dev/null; then
 fi
 
 echo
-echo "Deployment is ready: https://${APP_DOMAIN}"
+echo "Deployment is ready: http://${APP_HOST}"
 echo "The app is bound to 127.0.0.1:3000; PostgreSQL is bound to 127.0.0.1:5432."
-echo "In the EC2 security group allow inbound TCP 22, 80, and 443 only."
+echo "In the EC2 security group allow inbound TCP 22 and 80. Do not expose port 5432."
 echo "Service logs: journalctl -u ${SERVICE_NAME} -f"
