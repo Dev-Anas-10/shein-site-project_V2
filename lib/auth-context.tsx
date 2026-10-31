@@ -2,7 +2,6 @@
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { User } from './types';
-import { getSupabase } from './supabase';
 
 interface AuthContextType {
   user: User | null;
@@ -37,13 +36,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (parsed?.id && parsed?.email && parsed?.role) {
           setUser(parsed);
 
-          // Synchronize secure HTTP-only session cookie with server
-          fetch('/api/auth/sync', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ userId: parsed.id, email: parsed.email }),
-          }).catch(() => {});
-
           // Asynchronously hydrate fresh profile data from DB (address, phone, city)
           fetch(
             `/api/users/profile?userId=${encodeURIComponent(parsed.id)}&email=${encodeURIComponent(
@@ -67,53 +59,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setIsLoading(false);
     }
 
-    // 2. Sync with Supabase Auth (for official Google OAuth redirects)
-    const sb = getSupabase();
-    if (sb) {
-      const handleSupabaseSession = (sessionUser: any) => {
-        if (!sessionUser) return;
-        const meta = sessionUser.user_metadata || {};
-        const email = sessionUser.email || '';
-        const detectedName = meta.full_name || meta.name || email.split('@')[0] || 'Customer';
-        const detectedAvatar = meta.avatar_url || meta.picture || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(detectedName)}`;
-
-        // Verify or create via our Google login endpoint to ensure DB sync & session token
-        fetch('/api/auth/google', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email,
-            name: detectedName,
-            avatar: detectedAvatar,
-          }),
-        })
-          .then((r) => r.json())
-          .then((data) => {
-            if (data.success && data.data) {
-              login(data.data);
-            }
-          })
-          .catch((err) => console.error('Supabase auto-sync failed:', err));
-      };
-
-      // Check existing session
-      sb.auth.getSession().then(({ data: { session } }) => {
-        if (session?.user) {
-          handleSupabaseSession(session.user);
-        }
-      });
-
-      // Listen for OAuth redirects & state changes
-      const { data: authListener } = sb.auth.onAuthStateChange((_event, session) => {
-        if (session?.user) {
-          handleSupabaseSession(session.user);
-        }
-      });
-
-      return () => {
-        authListener?.subscription.unsubscribe();
-      };
-    }
   }, []);
 
   const refreshProfile = async () => {
@@ -143,13 +88,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       console.warn('Could not save user session to localStorage:', err);
     }
 
-    // Ensure session cookie is refreshed
-    fetch('/api/auth/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: newUser.id, email: newUser.email }),
-    }).catch(() => {});
-
     // Trigger immediate background sync of extended address details
     fetch(
       `/api/users/profile?userId=${encodeURIComponent(newUser.id)}&email=${encodeURIComponent(
@@ -174,10 +112,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       sessionStorage.clear();
     } catch {}
     fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
-    const sb = getSupabase();
-    if (sb) {
-      sb.auth.signOut().catch(() => {});
-    }
     if (typeof window !== 'undefined') {
       window.location.href = '/';
     }

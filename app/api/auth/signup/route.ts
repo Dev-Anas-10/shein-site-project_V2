@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db';
+import { db, DuplicateUserError } from '@/lib/db';
 import { User } from '@/lib/types';
 import { hashPassword, createSessionToken, setSessionCookie } from '@/lib/auth-security';
 
@@ -52,6 +52,9 @@ export async function POST(req: NextRequest) {
     setSessionCookie(res, token);
     return res;
   } catch (err: any) {
+    if (err instanceof DuplicateUserError) {
+      return NextResponse.json({ error: err.message }, { status: 409 });
+    }
     return NextResponse.json({ error: err.message || 'Signup failed' }, { status: 500 });
   }
 }

@@ -5,10 +5,16 @@ import { NextRequest, NextResponse } from 'next/server';
 const SALT_ROUNDS = 10;
 
 export const SESSION_COOKIE_NAME = 'shein_session';
-const SESSION_SECRET =
-  process.env.SESSION_SECRET ||
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  'shein-concierge-secure-secret-key-prod-2026';
+const DEVELOPMENT_SESSION_SECRET = 'local-development-session-secret-change-before-deploy';
+
+function getSessionSecret(): string {
+  const configured = process.env.SESSION_SECRET;
+  if (configured) return configured;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('SESSION_SECRET must be set in production.');
+  }
+  return DEVELOPMENT_SESSION_SECRET;
+}
 
 export interface AuthSession {
   userId: string;
@@ -77,7 +83,7 @@ export function createSessionToken(
     exp: now + maxAgeSeconds,
   };
   const b64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(b64).digest('base64url');
+  const sig = crypto.createHmac('sha256', getSessionSecret()).update(b64).digest('base64url');
   return `${b64}.${sig}`;
 }
 
@@ -91,7 +97,7 @@ export function verifySessionToken(token?: string | null): AuthSession | null {
   const [pB64, pSig] = parts;
 
   try {
-    const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(pB64).digest('base64url');
+    const expectedSig = crypto.createHmac('sha256', getSessionSecret()).update(pB64).digest('base64url');
     const sigBuf = Buffer.from(pSig);
     const expBuf = Buffer.from(expectedSig);
 

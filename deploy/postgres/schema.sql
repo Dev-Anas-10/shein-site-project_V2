@@ -1,0 +1,8 @@
+CREATE TABLE IF NOT EXISTS public.app_state (
+  id SMALLINT PRIMARY KEY CHECK (id = 1),
+  state JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE public.app_state OWNER TO CURRENT_USER;
+REVOKE ALL ON TABLE public.app_state FROM PUBLIC;

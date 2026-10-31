@@ -4,28 +4,11 @@ import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from '@/lib/auth-context';
 import { useThemeLang } from '@/lib/theme-lang-context';
-import { getSupabase } from '@/lib/supabase';
 import { X, Mail, Lock, User, Phone, ShieldCheck, AlertCircle, Sparkles } from 'lucide-react';
 
 declare global {
   interface Window {
     google?: any;
-  }
-}
-
-function parseJwt(token: string) {
-  try {
-    const base64Url = token.split('.')[1];
-    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-    const jsonPayload = decodeURIComponent(
-      atob(base64)
-        .split('')
-        .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
-        .join('')
-    );
-    return JSON.parse(jsonPayload);
-  } catch (e) {
-    return null;
   }
 }
 
@@ -63,52 +46,15 @@ export function AuthModal({ isOpen, onClose, defaultRole = 'user' }: AuthModalPr
     setError(null);
 
     try {
-      const payload = parseJwt(response.credential);
-      if (!payload || !payload.email) {
-        throw new Error('Failed to parse Google account information');
-      }
-
-      const cleanEmail = payload.email.toLowerCase();
-      const detectedName = payload.name || payload.given_name || cleanEmail.split('@')[0];
-      const avatar =
-        payload.picture ||
-        `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(detectedName)}`;
-
-      // 1. Sync user to Supabase DB via our API
       const res = await fetch('/api/auth/google', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: cleanEmail,
-          name: detectedName,
-          avatar,
-        }),
+        body: JSON.stringify({ idToken: response.credential }),
       });
 
       const data = await res.json();
-      if (res.ok && data.data) {
-        login(data.data);
-      } else {
-        login({
-          id: `google-${payload.sub || Date.now()}`,
-          name: detectedName,
-          email: cleanEmail,
-          avatar,
-          role: 'user',
-          createdAt: new Date().toISOString(),
-        });
-      }
-
-      // 2. Also authenticate Supabase session if supported
-      const sb = getSupabase();
-      if (sb) {
-        sb.auth
-          .signInWithIdToken({
-            provider: 'google',
-            token: response.credential,
-          })
-          .catch((e) => console.warn('Supabase signInWithIdToken sync note:', e));
-      }
+      if (!res.ok || !data.data) throw new Error(data.error || 'Google sign-in failed.');
+      login(data.data);
 
       onClose();
     } catch (err: any) {
@@ -126,8 +72,13 @@ export function AuthModal({ isOpen, onClose, defaultRole = 'user' }: AuthModalPr
     setGoogleLoading(true);
 
     const clientId =
-      process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ||
-      '392409310054-et01pph0ao3gt9mfjaq8equ5rh2coa05.apps.googleusercontent.com';
+      process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '';
+
+    if (!clientId) {
+      setGoogleLoading(false);
+      setError('Google sign-in is not configured. Please use email and password.');
+      return;
+    }
 
     // 1. Direct Google Identity Services (GIS) Token Client - Initiated directly from app domain, never showing supabase domain
     if (typeof window !== 'undefined' && window.google?.accounts?.oauth2) {
@@ -144,44 +95,15 @@ export function AuthModal({ isOpen, onClose, defaultRole = 'user' }: AuthModalPr
 
             if (tokenResponse?.access_token) {
               try {
-                const userRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-                  headers: { Authorization: `Bearer ${tokenResponse.access_token}` },
-                });
-                const googleProfile = await userRes.json();
-
-                if (!googleProfile?.email) {
-                  throw new Error('Could not retrieve email from Google');
-                }
-
-                const cleanEmail = googleProfile.email.toLowerCase();
-                const detectedName = googleProfile.name || cleanEmail.split('@')[0];
-                const avatar =
-                  googleProfile.picture ||
-                  `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(detectedName)}`;
-
                 const res = await fetch('/api/auth/google', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    email: cleanEmail,
-                    name: detectedName,
-                    avatar,
-                  }),
+                  body: JSON.stringify({ accessToken: tokenResponse.access_token }),
                 });
 
                 const data = await res.json();
-                if (res.ok && data.data) {
-                  login(data.data);
-                } else {
-                  login({
-                    id: `google-${googleProfile.sub || Date.now()}`,
-                    name: detectedName,
-                    email: cleanEmail,
-                    avatar,
-                    role: 'user',
-                    createdAt: new Date().toISOString(),
-                  });
-                }
+                if (!res.ok || !data.data) throw new Error(data.error || 'Google sign-in failed.');
+                login(data.data);
 
                 onClose();
               } catch (fetchErr: any) {
@@ -201,117 +123,14 @@ export function AuthModal({ isOpen, onClose, defaultRole = 'user' }: AuthModalPr
       }
     }
 
-    // 2. Fallback to Supabase OAuth popup if GIS script was blocked
-    try {
-      const redirectOrigin =
-        typeof window !== 'undefined'
-          ? window.location.origin
-          : 'https://shein-cart-concierge.vercel.app';
-      const redirectUrl = `${redirectOrigin}/auth/callback`;
-
-      const authUrl = `https://sxcsgnzkgwctafqxkfdd.supabase.co/auth/v1/authorize?provider=google&redirect_to=${encodeURIComponent(
-        redirectUrl
-      )}`;
-
-      // On mobile devices, redirect directly instead of popup for a seamless full-screen login
-      const isMobile =
-        typeof window !== 'undefined' &&
-        (window.innerWidth < 768 || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent));
-
-      if (isMobile) {
-        window.location.href = authUrl;
-        return;
-      }
-
-      const width = 500;
-      const height = 650;
-      const left = window.screenX + Math.max(0, (window.outerWidth - width) / 2);
-      const top = window.screenY + Math.max(0, (window.outerHeight - height) / 2);
-
-      const popup = window.open(
-        authUrl,
-        'GoogleSignInPopup',
-        `width=${width},height=${height},left=${left},top=${top},status=no,resizable=yes,scrollbars=yes`
-      );
-
-      if (!popup || popup.closed || typeof popup.closed === 'undefined') {
-        // Fallback to direct redirect if popup blocked
-        window.location.href = authUrl;
-        return;
-      }
-
-      // 1. Listen for auth success message from callback window
-      const messageHandler = (e: MessageEvent) => {
-        if (e.data?.type === 'GOOGLE_AUTH_SUCCESS') {
-          window.removeEventListener('message', messageHandler);
-          setGoogleLoading(false);
-          if (e.data.user) {
-            login({
-              id: `google-${Date.now()}`,
-              name: e.data.user.name,
-              email: e.data.user.email,
-              avatar: e.data.user.avatar,
-              role: 'user',
-              createdAt: new Date().toISOString(),
-            });
-          }
-          onClose();
-        } else if (e.data?.type === 'GOOGLE_AUTH_DONE') {
-          window.removeEventListener('message', messageHandler);
-          setGoogleLoading(false);
-        }
-      };
-      window.addEventListener('message', messageHandler);
-
-      // 2. Poll when popup window is closed by user
-      const timer = setInterval(() => {
-        if (popup.closed) {
-          clearInterval(timer);
-          window.removeEventListener('message', messageHandler);
-          setGoogleLoading(false);
-        }
-      }, 500);
-    } catch (err: any) {
-      console.warn('Google OAuth note, showing manual input:', err);
-      setShowGmailInput(true);
-      setError(err.message);
-      setGoogleLoading(false);
-    }
+    setGoogleLoading(false);
+    setError('Google sign-in is unavailable. Please use email and password.');
   };
 
   const handleGmailSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    const cleanEmail = gmailEmail.trim().toLowerCase();
-    if (!cleanEmail || !cleanEmail.includes('@')) {
-      setError(dir === 'rtl' ? 'يرجى كتابة بريد Gmail صحيح (مثال: ahmed@gmail.com)' : 'Please enter a valid Gmail address');
-      return;
-    }
-
-    setGoogleLoading(true);
-    setError(null);
-    try {
-      const detectedName = gmailName.trim() || cleanEmail.split('@')[0];
-      const res = await fetch('/api/auth/google', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: cleanEmail,
-          name: detectedName,
-          avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(detectedName)}`,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Google login failed');
-      login(data.data);
-      setShowGmailInput(false);
-      onClose();
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setGoogleLoading(false);
-    }
+    setError('Please use Google sign-in or your email and password.');
   };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormLoading(true);
@@ -517,7 +336,7 @@ export function AuthModal({ isOpen, onClose, defaultRole = 'user' }: AuthModalPr
                   <div className="text-center">
                     <button
                       type="button"
-                      onClick={() => setShowGmailInput(true)}
+                      onClick={() => setError('Use Google sign-in or the email and password form below.')}
                       className="text-[11px] text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 underline font-medium cursor-pointer"
                     >
                       {isRtl ? 'أو الدخول بكتابة إيميل Gmail يدوياً' : 'Or type Gmail address manually'}

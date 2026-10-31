@@ -1,18 +1,15 @@
 /**
- * Persistent database layer with multi-level fallback:
- *  1. Upstash Redis (shared across all Vercel serverless instances when env vars exist)
- *  2. Local /tmp file (on Vercel) initialized from bundled data/db.json
- *  3. data/db.json (local file system)
- *  4. In-memory cache
+ * PostgreSQL-backed database layer. Local JSON persistence is available only
+ * for development when PostgreSQL environment variables are not configured.
  */
 
 import fs from 'fs';
 import path from 'path';
-import { Order, SystemSettings, User, GoodItem, Shipment, ShipmentStatus, OrderAuditEntry } from './types';
-import { RELIABLE_FASHION_IMAGES, resolveItemPricing } from './shein-extractor';
+import { Order, SystemSettings, User, Shipment, OrderAuditEntry } from './types';
+import { resolveItemPricing } from './shein-extractor';
 import { normalizeOrderLinks } from './shein-links';
-import { getSupabaseAdmin } from './supabase';
 import { broadcastRealtimeEvent } from './realtime-events';
+import { isPostgresConfigured, readPostgresState, writePostgresState } from './postgres';
 
 /* ─────────────────────────────── Types ─────────────────────────────── */
 
@@ -24,23 +21,6 @@ interface DatabaseSchema {
 }
 
 /* ─────────────────────────────── Defaults ─────────────────────────── */
-
-const DEFAULT_SHIPMENTS: Shipment[] = [
-  {
-    id: 'SHP-202610-01',
-    code: 'شحنة نهاية أكتوبر (دفعة 1)',
-    status: 'PREPARING',
-    maxItems: 40,
-    maxOrders: 10,
-    carrier: 'Aramex',
-    trackingNumber: 'ARX-89302194EG',
-    estimatedArrival: '2026-11-05',
-    notes: 'تجميع طلبيات نهاية شهر أكتوبر - الشحن الجوي السريع',
-    orderIds: [],
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  },
-];
 
 const DEFAULT_SETTINGS: SystemSettings = {
   dynamicFeePercent: 0,
@@ -114,201 +94,6 @@ const DEFAULT_SETTINGS: SystemSettings = {
   ],
 };
 
-const DEFAULT_USERS: (User & { password?: string })[] = [
-  {
-    id: 'user-admin',
-    name: 'Admin Supervisor',
-    email: 'admin@sheinextract.com',
-    password: '$2b$10$XdSsrm.koBl9/5KrNmz5MudI1TlJ9ev8fgC9mx6XAjgVFRtmV61Be',
-    role: 'admin',
-    phone: '+20 100 000 0000',
-    avatar: 'https://api.dicebear.com/7.x/initials/svg?seed=Admin+Supervisor',
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'user-sara',
-    name: 'Sara Ahmed',
-    email: 'sara@example.com',
-    password: '$2b$10$9fkZ2LEzi64ml5Sgn60R.e8P89gqVI.y/mlA0f9A8XsMryuT0Vdj2',
-    role: 'user',
-    phone: '01019283746',
-    avatar: 'https://api.dicebear.com/7.x/initials/svg?seed=Sara+Ahmed',
-    createdAt: new Date().toISOString(),
-  },
-];
-
-const DEFAULT_ORDERS: Order[] = [
-  {
-    id: 'SH-19036',
-    userId: 'user-sara',
-    userName: 'Sara Ahmed',
-    userEmail: 'sara@example.com',
-    userPhone: '01019283746',
-    shippingAddress: '5 Street 250, Degla, Maadi, Cairo',
-    rawInput: 'https://onelink.shein.com/58/662zlco9zrsd?shc=2_RNmYr2Mxf4g',
-    extractedLink: 'https://onelink.shein.com/58/662zlco9zrsd?shc=2_RNmYr2Mxf4g',
-    items: [
-      {
-        id: 'item-1',
-        name: 'SHEIN Frenchy Solid Notch Neck Long Sleeve Top & Trousers Set',
-        image: RELIABLE_FASHION_IMAGES[0],
-        originalPrice: 650,
-        currency: 'EGP',
-        quantity: 1,
-        subtotal: 650,
-        adminComment: 'Size M in Mocha Brown confirmed in stock at regional fulfillment center',
-      },
-    ],
-    itemsCount: 1,
-    itemsSubtotal: 650,
-    dynamicFeePercent: 20,
-    dynamicFeeAmount: 130,
-    shippingFee: 0,
-    totalCash: 780,
-    currency: 'EGP',
-    status: 'APPROVED_PENDING_PAYMENT',
-    createdAt: new Date(Date.now() - 3600000 * 4).toISOString(),
-    updatedAt: new Date(Date.now() - 3600000).toISOString(),
-    reviewedBy: 'Admin Supervisor',
-    reviewedAt: new Date(Date.now() - 3600000).toISOString(),
-    adminComment: 'Accurately verified by supervisor. Cart is ready for payment.',
-    payment: {
-      method: 'vodafone_cash',
-      senderIdentifier: '01019283746',
-      transactionReference: 'VF-9482109',
-      submittedAt: new Date(Date.now() - 3600000 * 2).toISOString(),
-      adminNote: 'Payment confirmed by admin',
-    },
-  },
-  {
-    id: 'SH-89421',
-    userId: 'user-sara',
-    userName: 'Sara Ahmed',
-    userEmail: 'sara@example.com',
-    userPhone: '01019283746',
-    shippingAddress: 'Building 14, St 9, Maadi, Cairo, Egypt',
-    rawInput:
-      'I found some great items at SHEIN!\nThese items in my shopping cart are great. I highly recommend them to everyone!\nhttps://onelink.shein.com/58/662zlco9zrsd?shc=2_RNmYr2Mxf4g',
-    extractedLink: 'https://m.shein.com/ar/cart/share/landing?group_id=912245215&shc=2_RNmYr2Mxf4g&local_country=SA&cart_share=1',
-    cartShareCode: '2_RNmYr2Mxf4g',
-    cartGroupId: '912245215',
-    cartCoverImage: RELIABLE_FASHION_IMAGES[0],
-    items: [
-      {
-        id: 'item-1',
-        name: 'SHEIN Frenchy Solid Notch Neck Long Sleeve Top & Trousers Set',
-        image: RELIABLE_FASHION_IMAGES[0],
-        originalUrl: 'https://m.shein.com/ar/cart/share/landing?group_id=912245215&shc=2_RNmYr2Mxf4g&local_country=SA&cart_share=1',
-        sku: 'sz240819129532890',
-        color: 'Mocha Brown',
-        size: 'M',
-        originalPrice: 650,
-        currency: 'EGP',
-        quantity: 1,
-        subtotal: 650,
-        status: 'available',
-      },
-      {
-        id: 'item-2',
-        name: 'SHEIN EZwear Casual Drop Shoulder Ribbed Knit Cardigan',
-        image: RELIABLE_FASHION_IMAGES[1],
-        originalUrl: 'https://m.shein.com/ar/cart/share/landing?group_id=912245215&shc=2_RNmYr2Mxf4g&local_country=SA&cart_share=1',
-        sku: 'sw23080447382910',
-        color: 'Oatmeal Beige',
-        size: 'L',
-        originalPrice: 420,
-        currency: 'EGP',
-        quantity: 1,
-        subtotal: 420,
-        status: 'available',
-      },
-      {
-        id: 'item-3',
-        name: 'SHEIN Minimalist Quilted Shoulder Crossbody Bag With Chain',
-        image: RELIABLE_FASHION_IMAGES[2],
-        originalUrl: 'https://m.shein.com/ar/cart/share/landing?group_id=912245215&shc=2_RNmYr2Mxf4g&local_country=SA&cart_share=1',
-        sku: 'sg2310118837190',
-        color: 'Classic Black',
-        size: 'One Size',
-        originalPrice: 380,
-        currency: 'EGP',
-        quantity: 1,
-        subtotal: 380,
-        status: 'available',
-      },
-    ],
-    itemsCount: 3,
-    itemsSubtotal: 1450,
-    dynamicFeePercent: 20,
-    dynamicFeeAmount: 290,
-    shippingFee: 0,
-    totalCash: 1740,
-    currency: 'EGP',
-    status: 'PENDING_APPROVAL',
-    createdAt: new Date(Date.now() - 3600000 * 6).toISOString(),
-    updatedAt: new Date(Date.now() - 3600000 * 6).toISOString(),
-  },
-];
-
-/* ────────────────────────── Upstash Redis Layer ───────────────────── */
-
-type RedisClient = {
-  get: (key: string) => Promise<unknown>;
-  set: (key: string, value: unknown) => Promise<unknown>;
-};
-
-let _redis: RedisClient | null = null;
-
-function getRedis(): RedisClient | null {
-  if (_redis) return _redis;
-
-  const url = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
-  if (!url || !token) return null;
-
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { Redis } = require('@upstash/redis');
-    _redis = new Redis({ url, token }) as RedisClient;
-    return _redis;
-  } catch {
-    return null;
-  }
-}
-
-const REDIS_KEY = 'shein_concierge_db_v2';
-
-async function loadFromRedis(): Promise<DatabaseSchema | null> {
-  const r = getRedis();
-  if (!r) return null;
-  try {
-    const raw = await r.get(REDIS_KEY);
-    if (!raw) return null;
-    const parsed = typeof raw === 'string' ? JSON.parse(raw) : (raw as DatabaseSchema);
-    return {
-      users: parsed.users && parsed.users.length > 0 ? parsed.users : DEFAULT_USERS,
-      orders: parsed.orders && parsed.orders.length > 0 ? parsed.orders.map(sanitizeOrderPricingLock) : DEFAULT_ORDERS.map(sanitizeOrderPricingLock),
-      shipments: parsed.shipments && parsed.shipments.length > 0 ? parsed.shipments : DEFAULT_SHIPMENTS,
-      settings: parsed.settings ?? DEFAULT_SETTINGS,
-    };
-  } catch (err) {
-    console.warn('[DB] Redis read error:', err);
-    return null;
-  }
-}
-
-async function saveToRedis(data: DatabaseSchema): Promise<void> {
-  const r = getRedis();
-  if (!r) return;
-  try {
-    await r.set(REDIS_KEY, JSON.stringify(data));
-  } catch (err) {
-    console.warn('[DB] Redis write error:', err);
-  }
-}
-
-/* ────────────────────────── Supabase Layer ───────────────────────── */
-
 /* ────────────────────────── Concurrency & Merging ──────────────────────── */
 
 function mergeAuditLogs(a?: OrderAuditEntry[], b?: OrderAuditEntry[]): OrderAuditEntry[] {
@@ -325,123 +110,13 @@ function runWithDbMutex<T>(fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
-function mergeOrderLists(primary: Order[], secondary: Order[]): Order[] {
-  const map = new Map<string, Order>();
+export class DuplicateUserError extends Error {
+  readonly code = 'DUPLICATE_USER';
 
-  const hasLockedPricing = (o: Order) => Boolean(
-    o.isPriceLocked ||
-    o.lockedPricingSnapshot ||
-    (o.status && o.status !== 'PENDING_APPROVAL')
-  );
-
-  // 1. Seed with secondary (local state)
-  for (const o of secondary) {
-    if (o && o.id) {
-      map.set(o.id, { ...o });
-    }
+  constructor() {
+    super('An account with this email already exists.');
+    this.name = 'DuplicateUserError';
   }
-
-  // 2. Non-destructively merge primary (e.g. Supabase response)
-  for (const o of primary) {
-    if (!o || !o.id) continue;
-    const existing = map.get(o.id);
-    if (!existing) {
-      map.set(o.id, sanitizeOrderPricingLock({ ...o }));
-    } else {
-      const existingTime = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
-      const newTime = new Date(o.updatedAt || o.createdAt || 0).getTime();
-      const primaryIsNewer = newTime >= existingTime;
-
-      const base = primaryIsNewer ? o : existing;
-      const fallback = primaryIsNewer ? existing : o;
-
-      // SAFEGUARD 1: Shipment assignment (NEVER drop shipmentId/Code if either has it)
-      const shipmentId = base.shipmentId || fallback.shipmentId || undefined;
-      const shipmentCode = base.shipmentCode || fallback.shipmentCode || undefined;
-
-      // SAFEGUARD 2: Price locking immutability
-      const isPriceLocked = Boolean(
-        existing.isPriceLocked || o.isPriceLocked || hasLockedPricing(existing) || hasLockedPricing(o)
-      );
-      const lockedPricingSnapshot = existing.lockedPricingSnapshot || o.lockedPricingSnapshot || undefined;
-      const exchangeRateUsed = existing.exchangeRateUsed ?? o.exchangeRateUsed ?? undefined;
-      const profitMarginPercentUsed = existing.profitMarginPercentUsed ?? o.profitMarginPercentUsed ?? undefined;
-
-      // SAFEGUARD 3: Price preservation (Never overwrite reviewed/locked prices with unreviewed/stale numbers)
-      let items = base.items;
-      let itemsCount = base.itemsCount;
-      let itemsSubtotal = base.itemsSubtotal;
-      let dynamicFeePercent = base.dynamicFeePercent;
-      let dynamicFeeAmount = base.dynamicFeeAmount;
-      let shippingFee = base.shippingFee;
-      let totalCash = base.totalCash;
-
-      if (hasLockedPricing(existing) && !hasLockedPricing(o)) {
-        items = existing.items;
-        itemsCount = existing.itemsCount;
-        itemsSubtotal = existing.itemsSubtotal;
-        dynamicFeePercent = existing.dynamicFeePercent;
-        dynamicFeeAmount = existing.dynamicFeeAmount;
-        shippingFee = existing.shippingFee;
-        totalCash = existing.totalCash;
-      } else if (existing.lockedPricingSnapshot && !o.lockedPricingSnapshot) {
-        items = existing.lockedPricingSnapshot.items || existing.items;
-        itemsCount = items.length;
-        itemsSubtotal = existing.lockedPricingSnapshot.itemsSubtotal ?? existing.itemsSubtotal;
-        dynamicFeePercent = existing.lockedPricingSnapshot.dynamicFeePercent ?? existing.dynamicFeePercent;
-        dynamicFeeAmount = existing.lockedPricingSnapshot.dynamicFeeAmount ?? existing.dynamicFeeAmount;
-        shippingFee = existing.lockedPricingSnapshot.shippingFee ?? existing.shippingFee;
-        totalCash = existing.lockedPricingSnapshot.totalCash ?? existing.totalCash;
-      }
-
-      // SAFEGUARD 4: Payment details
-      const payment = (base.payment && (base.payment.submittedAt || base.payment.senderIdentifier || base.payment.method))
-        ? base.payment
-        : fallback.payment || base.payment;
-
-      // SAFEGUARD 5: Audit Log accumulation
-      const combinedAudit = mergeAuditLogs(existing.auditLog, o.auditLog);
-
-      // SAFEGUARD 6: Cancellation info
-      const cancelledAt = base.cancelledAt || fallback.cancelledAt || undefined;
-      const cancelledBy = base.cancelledBy || fallback.cancelledBy || undefined;
-      const cancellationReason = base.cancellationReason || fallback.cancellationReason || undefined;
-      const pricingExpiresAt = base.pricingExpiresAt || fallback.pricingExpiresAt || undefined;
-      const customerNotes = base.customerNotes || fallback.customerNotes || undefined;
-
-      const mergedOrder: Order = {
-        ...fallback,
-        ...base,
-        items,
-        itemsCount,
-        itemsSubtotal,
-        dynamicFeePercent,
-        dynamicFeeAmount,
-        shippingFee,
-        totalCash,
-        shipmentId,
-        shipmentCode,
-        isPriceLocked,
-        lockedPricingSnapshot,
-        exchangeRateUsed,
-        profitMarginPercentUsed,
-        payment,
-        auditLog: combinedAudit.length > 0 ? combinedAudit : undefined,
-        cancelledAt,
-        cancelledBy,
-        cancellationReason,
-        pricingExpiresAt,
-        customerNotes,
-      };
-
-      map.set(o.id, sanitizeOrderPricingLock(normalizeOrderLinks(mergedOrder)));
-    }
-  }
-
-  return Array.from(map.values())
-    .map(sanitizeOrderPricingLock)
-    .map(normalizeOrderLinks)
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 }
 
 function sanitizeOrderPricingLock(order: Order): Order {
@@ -482,276 +157,6 @@ function sanitizeOrderPricingLock(order: Order): Order {
   return order;
 }
 
-function mapRowToOrder(row: any): Order {
-  const paymentRaw = row.payment;
-  const meta = paymentRaw?._orderMeta || {};
-
-  let cleanPayment = undefined;
-  if (paymentRaw) {
-    const { _orderMeta, ...rest } = paymentRaw;
-    if (Object.keys(rest).length > 0) {
-      cleanPayment = rest;
-    }
-  }
-
-  return sanitizeOrderPricingLock(normalizeOrderLinks({
-    id: String(row.id),
-    userId: String(row.user_id ?? row.userId ?? ''),
-    userName: String(row.user_name ?? row.userName ?? ''),
-    userEmail: String(row.user_email ?? row.userEmail ?? ''),
-    userPhone: String(row.user_phone ?? row.userPhone ?? ''),
-    shippingAddress: row.shipping_address ?? row.shippingAddress ?? undefined,
-    rawInput: String(row.raw_input ?? row.rawInput ?? ''),
-    extractedLink: String(row.extracted_link ?? row.extractedLink ?? ''),
-    cartShareCode: row.cart_share_code ?? row.cartShareCode ?? undefined,
-    cartGroupId: row.cart_group_id ?? row.cartGroupId ?? undefined,
-    cartCoverImage: row.cart_cover_image ?? row.cartCoverImage ?? undefined,
-    items: Array.isArray(row.items)
-      ? row.items.map((it: any) => ({
-          ...it,
-          originalPrice: Number(it.originalPrice) || 0,
-          originalPriceBeforeDiscount:
-            typeof it.originalPriceBeforeDiscount === 'number'
-              ? it.originalPriceBeforeDiscount
-              : it.originalPriceBeforeDiscount
-              ? Number(it.originalPriceBeforeDiscount)
-              : undefined,
-          discountPercent:
-            typeof it.discountPercent === 'number'
-              ? it.discountPercent
-              : it.discountPercent
-              ? Number(it.discountPercent)
-              : undefined,
-        }))
-      : [],
-    itemsCount: Number(row.items_count ?? row.itemsCount ?? (Array.isArray(row.items) ? row.items.length : 0)),
-    itemsSubtotal: Number(row.items_subtotal ?? row.itemsSubtotal ?? 0),
-    dynamicFeePercent: Number(row.dynamic_fee_percent ?? row.dynamicFeePercent ?? 0),
-    dynamicFeeAmount: Number(row.dynamic_fee_amount ?? row.dynamicFeeAmount ?? 0),
-    shippingFee: Number(row.shipping_fee ?? row.shippingFee ?? 0),
-    totalCash: Number(row.total_cash ?? row.totalCash ?? 0),
-    currency: String(row.currency ?? 'EGP'),
-    status: row.status ?? 'PENDING_APPROVAL',
-    customerNotes: row.customer_notes ?? row.customerNotes ?? meta.customerNotes ?? undefined,
-    shipmentId: row.shipment_id ?? row.shipmentId ?? meta.shipmentId ?? undefined,
-    shipmentCode: row.shipment_code ?? row.shipmentCode ?? meta.shipmentCode ?? undefined,
-    adminComment: row.admin_comment ?? row.adminComment ?? undefined,
-    payment: cleanPayment,
-    reviewedBy: row.reviewed_by ?? row.reviewedBy ?? undefined,
-    reviewedAt: row.reviewed_at ?? row.reviewedAt ?? undefined,
-    pricingExpiresAt: row.pricing_expires_at ?? row.pricingExpiresAt ?? meta.pricingExpiresAt ?? undefined,
-    cancelledAt: row.cancelled_at ?? row.cancelledAt ?? meta.cancelledAt ?? undefined,
-    cancelledBy: row.cancelled_by ?? row.cancelledBy ?? meta.cancelledBy ?? undefined,
-    cancellationReason: row.cancellation_reason ?? row.cancellationReason ?? meta.cancellationReason ?? undefined,
-    auditLog: Array.isArray(row.audit_log ?? row.auditLog ?? meta.auditLog) ? (row.audit_log ?? row.auditLog ?? meta.auditLog) : undefined,
-    isPriceLocked:
-      typeof row.is_price_locked === 'boolean'
-        ? row.is_price_locked
-        : typeof row.isPriceLocked === 'boolean'
-        ? row.isPriceLocked
-        : typeof meta.isPriceLocked === 'boolean'
-        ? meta.isPriceLocked
-        : ['APPROVED_PENDING_PAYMENT', 'PAYMENT_UNDER_REVIEW', 'PAID', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'COMPLETED', 'CANCELLED'].includes(row.status),
-    exchangeRateUsed: row.exchange_rate_used ?? row.exchangeRateUsed ?? meta.exchangeRateUsed ?? undefined,
-    profitMarginPercentUsed: row.profit_margin_percent_used ?? row.profitMarginPercentUsed ?? meta.profitMarginPercentUsed ?? undefined,
-    lockedPricingSnapshot: row.locked_pricing_snapshot ?? row.lockedPricingSnapshot ?? meta.lockedPricingSnapshot ?? undefined,
-    createdAt: row.created_at ?? row.createdAt ?? new Date().toISOString(),
-    updatedAt: row.updated_at ?? row.updatedAt ?? new Date().toISOString(),
-  }));
-}
-
-function mapRowToUser(row: any): User & { password?: string } {
-  return {
-    id: String(row.id),
-    name: String(row.name),
-    email: String(row.email).toLowerCase(),
-    password: row.password ?? undefined,
-    role: (row.role === 'admin' ? 'admin' : 'user'),
-    phone: row.phone ?? '',
-    address: row.address ?? row.shipping_address ?? '',
-    city: row.city ?? '',
-    avatar: row.avatar ?? `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(row.name || 'User')}`,
-    createdAt: row.created_at ?? row.createdAt ?? new Date().toISOString(),
-    lastLoginAt: row.last_login_at ?? row.lastLoginAt ?? undefined,
-  };
-}
-
-async function loadFromSupabase(): Promise<DatabaseSchema | null> {
-  const sb = getSupabaseAdmin();
-  if (!sb) return null;
-  try {
-    const [ordersRes, usersRes] = await Promise.all([
-      sb.from('orders').select('*').order('created_at', { ascending: false }),
-      sb.from('users').select('*'),
-    ]);
-
-    if (usersRes.error) {
-      console.warn('[Supabase] Users read error:', usersRes.error.message);
-    }
-    if (ordersRes.error) {
-      console.warn('[Supabase] Orders read error:', ordersRes.error.message);
-    }
-
-    const users = usersRes.data && usersRes.data.length > 0 ? usersRes.data.map(mapRowToUser) : DEFAULT_USERS;
-    const fileFallback = loadFromFile();
-    const localOrders = fileFallback?.orders || memoryDb?.orders || DEFAULT_ORDERS;
-    const supabaseOrders = ordersRes.data && ordersRes.data.length > 0 ? ordersRes.data.map(mapRowToOrder) : [];
-    // Bi-directional merge: Never lose local orders if Supabase has not yet synced or lagged!
-    const orders = mergeOrderLists(supabaseOrders, localOrders);
-    const shipments = fileFallback && fileFallback.shipments && fileFallback.shipments.length > 0 ? fileFallback.shipments : DEFAULT_SHIPMENTS;
-    const settings = fileFallback?.settings ?? DEFAULT_SETTINGS;
-
-    return {
-      users,
-      orders,
-      shipments,
-      settings,
-    };
-  } catch (err) {
-    console.warn('[Supabase] Read note:', err);
-    return null;
-  }
-}
-
-const IS_PRODUCTION = process.env.VERCEL === '1' || process.env.NODE_ENV === 'production';
-
-async function syncUserToSupabase(user: User & { password?: string }): Promise<void> {
-  const sb = getSupabaseAdmin();
-  if (!sb) {
-    if (IS_PRODUCTION) {
-      throw new Error('[Database Error] Supabase is not configured in production. User cannot be persisted.');
-    }
-    return;
-  }
-  try {
-    const payload: any = {
-      id: user.id,
-      name: user.name,
-      email: user.email.toLowerCase(),
-      password: user.password,
-      role: user.role,
-      phone: user.phone || '',
-      avatar: user.avatar,
-      created_at: user.createdAt,
-    };
-    if (user.address) payload.address = user.address;
-    if (user.city) payload.city = user.city;
-    if (user.lastLoginAt) {
-      payload.last_login_at = user.lastLoginAt;
-    }
-    const { error } = await sb.from('users').upsert(payload);
-    if (error) {
-      console.error('[Supabase] Critical User upsert error:', error.message);
-      if (IS_PRODUCTION) {
-        throw new Error(`[Database Error] Failed to persist user in Supabase: ${error.message}`);
-      }
-    } else {
-      console.log('[Supabase] User synced successfully:', user.email);
-    }
-  } catch (err: any) {
-    console.error('[Supabase] User upsert exception:', err);
-    if (IS_PRODUCTION) {
-      throw err instanceof Error ? err : new Error(String(err));
-    }
-  }
-}
-
-async function syncOrderToSupabase(order: Order): Promise<void> {
-  const sb = getSupabaseAdmin();
-  if (!sb) {
-    if (IS_PRODUCTION) {
-      throw new Error('[Database Error] Supabase is not configured in production. Order cannot be persisted.');
-    }
-    return;
-  }
-  try {
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Supabase sync timeout (8s)')), 8000)
-    );
-    const syncPromise = sb.from('orders').upsert({
-      id: order.id,
-      user_id: order.userId,
-      user_name: order.userName,
-      user_email: order.userEmail,
-      user_phone: order.userPhone,
-      shipping_address: order.shippingAddress || null,
-      raw_input: order.rawInput,
-      extracted_link: order.extractedLink,
-      items: order.items,
-      items_count: order.itemsCount,
-      items_subtotal: order.itemsSubtotal,
-      dynamic_fee_percent: order.dynamicFeePercent,
-      dynamic_fee_amount: order.dynamicFeeAmount,
-      shipping_fee: order.shippingFee || 0,
-      total_cash: order.totalCash,
-      currency: order.currency || 'EGP',
-      status: order.status,
-      admin_comment: order.adminComment || null,
-      payment: {
-        ...(order.payment || {}),
-        _orderMeta: {
-          shipmentId: order.shipmentId || null,
-          shipmentCode: order.shipmentCode || null,
-          isPriceLocked: order.isPriceLocked ?? null,
-          exchangeRateUsed: order.exchangeRateUsed ?? null,
-          profitMarginPercentUsed: order.profitMarginPercentUsed ?? null,
-          lockedPricingSnapshot: order.lockedPricingSnapshot || null,
-          pricingExpiresAt: order.pricingExpiresAt || null,
-          cancelledAt: order.cancelledAt || null,
-          cancelledBy: order.cancelledBy || null,
-          cancellationReason: order.cancellationReason || null,
-          auditLog: order.auditLog || null,
-          customerNotes: order.customerNotes || null,
-        },
-      },
-      reviewed_by: order.reviewedBy || null,
-      reviewed_at: order.reviewedAt || null,
-      created_at: order.createdAt,
-      updated_at: order.updatedAt,
-    });
-    const result: any = await Promise.race([syncPromise, timeoutPromise]);
-    if (result && result.error) {
-      console.error('[Supabase] Critical Order upsert error:', result.error.message);
-      if (IS_PRODUCTION) {
-        throw new Error(`[Database Error] Failed to persist order in Supabase: ${result.error.message}`);
-      }
-    } else {
-      console.log('[Supabase] Order synced successfully:', order.id);
-    }
-  } catch (err: any) {
-    console.error('[Supabase] Upsert exception:', err);
-    if (IS_PRODUCTION) {
-      throw err instanceof Error ? err : new Error(String(err));
-    }
-  }
-}
-
-async function deleteOrderFromSupabase(id: string): Promise<void> {
-  const sb = getSupabaseAdmin();
-  if (!sb) {
-    if (IS_PRODUCTION) {
-      throw new Error('[Database Error] Supabase is not configured in production. Order cannot be deleted.');
-    }
-    return;
-  }
-  try {
-    const { error } = await sb.from('orders').delete().eq('id', id);
-    if (error) {
-      console.error('[Supabase] Critical Delete error:', error.message);
-      if (IS_PRODUCTION) {
-        throw new Error(`[Database Error] Failed to delete order in Supabase: ${error.message}`);
-      }
-    }
-  } catch (err: any) {
-    console.error('[Supabase] Delete exception:', err);
-    if (IS_PRODUCTION) {
-      throw err instanceof Error ? err : new Error(String(err));
-    }
-  }
-}
-
-/* ──────────────────────────── File-based Layer ────────────────────── */
-
 const LOCAL_DB_PATH = path.join(process.cwd(), 'data', 'db.json');
 
 function getDbFilePath(): string {
@@ -771,9 +176,9 @@ function loadFromFile(): DatabaseSchema | null {
       const parsed = JSON.parse(raw);
       if (parsed) {
         return {
-          users: parsed.users && parsed.users.length > 0 ? parsed.users : DEFAULT_USERS,
-          orders: parsed.orders && parsed.orders.length > 0 ? parsed.orders.map(sanitizeOrderPricingLock) : DEFAULT_ORDERS.map(sanitizeOrderPricingLock),
-          shipments: parsed.shipments && parsed.shipments.length > 0 ? parsed.shipments : DEFAULT_SHIPMENTS,
+          users: Array.isArray(parsed.users) ? parsed.users : [],
+          orders: Array.isArray(parsed.orders) ? parsed.orders.map(sanitizeOrderPricingLock) : [],
+          shipments: Array.isArray(parsed.shipments) ? parsed.shipments : [],
           settings: parsed.settings ?? DEFAULT_SETTINGS,
         };
       }
@@ -789,9 +194,9 @@ function loadFromFile(): DatabaseSchema | null {
       const parsed = JSON.parse(raw);
       if (parsed) {
         return {
-          users: parsed.users && parsed.users.length > 0 ? parsed.users : DEFAULT_USERS,
-          orders: parsed.orders && parsed.orders.length > 0 ? parsed.orders.map(sanitizeOrderPricingLock) : DEFAULT_ORDERS.map(sanitizeOrderPricingLock),
-          shipments: parsed.shipments && parsed.shipments.length > 0 ? parsed.shipments : DEFAULT_SHIPMENTS,
+          users: Array.isArray(parsed.users) ? parsed.users : [],
+          orders: Array.isArray(parsed.orders) ? parsed.orders.map(sanitizeOrderPricingLock) : [],
+          shipments: Array.isArray(parsed.shipments) ? parsed.shipments : [],
           settings: parsed.settings ?? DEFAULT_SETTINGS,
         };
       }
@@ -831,9 +236,9 @@ let memoryDb: DatabaseSchema | null = null;
 
 function defaultDb(): DatabaseSchema {
   return {
-    users: DEFAULT_USERS,
-    orders: DEFAULT_ORDERS,
-    shipments: DEFAULT_SHIPMENTS,
+    users: [],
+    orders: [],
+    shipments: [],
     settings: DEFAULT_SETTINGS,
   };
 }
@@ -843,159 +248,103 @@ function defaultDb(): DatabaseSchema {
 async function ensureDb(forceRefresh = false): Promise<DatabaseSchema> {
   if (memoryDb && !forceRefresh) return memoryDb;
 
-  // 1. Try Supabase (primary source of truth for multi-user sync)
-  const fromSupabase = await loadFromSupabase();
-  if (fromSupabase) {
-    memoryDb = fromSupabase;
-    // Task 13: READ PURITY. Never write to file on read requests!
+  if (isPostgresConfigured()) {
+    const state = await readPostgresState();
+    if (state && typeof state === 'object') {
+      const saved = state as Partial<DatabaseSchema>;
+      memoryDb = {
+        users: Array.isArray(saved.users) ? saved.users : [],
+        orders: Array.isArray(saved.orders) ? saved.orders.map(sanitizeOrderPricingLock) : [],
+        shipments: Array.isArray(saved.shipments) ? saved.shipments : [],
+        settings: { ...DEFAULT_SETTINGS, ...(saved.settings || {}) },
+      };
+      return memoryDb;
+    }
+
+    // New installs start with empty customer and order lists. Admin accounts
+    // are created explicitly by scripts/create-admin.mjs.
+    memoryDb = process.env.NODE_ENV === 'production' ? defaultDb() : loadFromFile() || defaultDb();
+    await writePostgresState(memoryDb);
     return memoryDb;
   }
 
-  // 2. Try Redis
-  const fromRedis = await loadFromRedis();
-  if (fromRedis) {
-    memoryDb = fromRedis;
-    return memoryDb;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('PostgreSQL is required in production. Configure PGHOST, PGDATABASE, PGUSER, and PGPASSWORD.');
   }
 
-  // 3. Try file
-  const fromFile = loadFromFile();
-  if (fromFile) {
-    memoryDb = fromFile;
-    return memoryDb;
-  }
-
-  // 4. Defaults
-  memoryDb = defaultDb();
-  await persistDb(memoryDb);
+  memoryDb = loadFromFile() || defaultDb();
   return memoryDb;
 }
 
 async function persistDb(data: DatabaseSchema): Promise<void> {
-  memoryDb = data;
-  if (getRedis()) {
-    await saveToRedis(data);
+  if (isPostgresConfigured()) {
+    await writePostgresState(data);
+  } else if (process.env.NODE_ENV === 'production') {
+    throw new Error('PostgreSQL is required in production. Refusing to save application data to local files.');
+  } else {
+    saveToFile(data);
   }
-  saveToFile(data);
+  memoryDb = data;
 }
 
 /* ──────────────────────────── Data Access ──────────────────────────── */
 
 export const db = {
   getUsers: async (): Promise<(User & { password?: string })[]> => {
-    const sb = getSupabaseAdmin();
-    if (sb) {
-      try {
-        const { data, error } = await sb.from('users').select('*');
-        if (data && !error && data.length > 0) {
-          return data.map(mapRowToUser);
-        }
-      } catch (err) {
-        console.warn('[DB] Supabase getUsers fallback:', err);
-      }
-    }
     return (await ensureDb()).users;
   },
 
   getUserByEmail: async (email: string): Promise<(User & { password?: string }) | undefined> => {
     const lower = email.toLowerCase().trim();
-    const sb = getSupabaseAdmin();
-    if (sb) {
-      try {
-        const { data, error } = await sb.from('users').select('*').eq('email', lower).maybeSingle();
-        if (data && !error) {
-          const mapped = mapRowToUser(data);
-          const currentData = await ensureDb();
-          const idx = currentData.users.findIndex((u) => u.email.toLowerCase() === lower);
-          if (idx >= 0) {
-            currentData.users[idx] = mapped;
-          } else {
-            currentData.users.push(mapped);
-          }
-          return mapped;
-        }
-      } catch (err) {
-        console.warn('[DB] Supabase user lookup fallback:', err);
-      }
-    }
     return (await ensureDb()).users.find((u) => u.email.toLowerCase() === lower);
   },
 
   getUserById: async (id: string): Promise<(User & { password?: string }) | undefined> => {
-    const sb = getSupabaseAdmin();
-    if (sb) {
-      try {
-        const { data, error } = await sb.from('users').select('*').eq('id', id).maybeSingle();
-        if (data && !error) {
-          return mapRowToUser(data);
-        }
-      } catch (err) {
-        console.warn('[DB] Supabase getUserById fallback:', err);
-      }
-    }
     return (await ensureDb()).users.find((u) => u.id === id);
   },
 
   createUser: async (user: User & { password?: string }): Promise<User> => {
-    const data = await ensureDb();
-    data.users.push(user);
-    await persistDb(data);
-    await syncUserToSupabase(user);
-    const { password, ...safe } = user;
-    return safe;
+    return runWithDbMutex(async () => {
+      const data = await ensureDb();
+      const email = user.email.toLowerCase().trim();
+      if (data.users.some((existing) => existing.email.toLowerCase().trim() === email)) {
+        throw new DuplicateUserError();
+      }
+      const savedUser = { ...user, email };
+      data.users.push(savedUser);
+      await persistDb(data);
+      const { password, ...safe } = savedUser;
+      return safe;
+    });
   },
 
   updateUser: async (
     id: string,
     updates: Partial<User & { password?: string }>
   ): Promise<User | undefined> => {
-    const data = await ensureDb();
-    const idx = data.users.findIndex((u) => u.id === id);
-    if (idx === -1) {
-      const sb = getSupabaseAdmin();
-      if (sb) {
-        try {
-          const payload: any = {};
-          if (updates.name) payload.name = updates.name;
-          if (updates.password) payload.password = updates.password;
-          if (updates.phone) payload.phone = updates.phone;
-          if (updates.address) payload.address = updates.address;
-          if (updates.city) payload.city = updates.city;
-          if (updates.lastLoginAt) payload.last_login_at = updates.lastLoginAt;
-          await sb.from('users').update(payload).eq('id', id);
-        } catch (e) {
-          console.warn('[DB] Supabase updateUser direct fallback:', e);
-        }
-      }
-      return undefined;
-    }
-    const updated = { ...data.users[idx], ...updates };
-    data.users[idx] = updated;
-    await persistDb(data);
-    await syncUserToSupabase(updated);
-    const { password, ...safe } = updated;
-    return safe;
+    return runWithDbMutex(async () => {
+      const data = await ensureDb();
+      const idx = data.users.findIndex((u) => u.id === id);
+      if (idx === -1) return undefined;
+      const updated = { ...data.users[idx], ...updates };
+      data.users[idx] = updated;
+      await persistDb(data);
+      const { password, ...safe } = updated;
+      return safe;
+    });
   },
 
   recordUserLogin: async (id: string): Promise<string> => {
-    const now = new Date().toISOString();
-    const data = await ensureDb();
-    const idx = data.users.findIndex((u) => u.id === id);
-    if (idx !== -1) {
-      data.users[idx].lastLoginAt = now;
-      await persistDb(data);
-      await syncUserToSupabase(data.users[idx]);
-    } else {
-      const sb = getSupabaseAdmin();
-      if (sb) {
-        try {
-          await sb.from('users').update({ last_login_at: now }).eq('id', id);
-        } catch (e) {
-          console.warn('[DB] Supabase recordUserLogin error:', e);
-        }
+    return runWithDbMutex(async () => {
+      const now = new Date().toISOString();
+      const data = await ensureDb();
+      const idx = data.users.findIndex((u) => u.id === id);
+      if (idx !== -1) {
+        data.users[idx].lastLoginAt = now;
+        await persistDb(data);
       }
-    }
-    return now;
+      return now;
+    });
   },
 
   getSettings: async (): Promise<SystemSettings> => {
@@ -1088,8 +437,6 @@ export const db = {
         order.totalCash = itemsSubtotal + dynamicFeeAmount + newShippingFee;
         order.itemsCount = activeItems.length;
         order.updatedAt = new Date().toISOString();
-
-        await syncOrderToSupabase(order);
       }
     }
 
@@ -1126,7 +473,6 @@ export const db = {
           order.cancellationReason = 'انتهت مهلة سداد السعر المعتمد (ساعة واحدة) دون إتمام الدفع';
           order.updatedAt = new Date().toISOString();
           expiredCount++;
-          await syncOrderToSupabase(order);
         }
       }
     }
@@ -1146,27 +492,7 @@ export const db = {
   }): Promise<Order[]> => {
     // Task 13: Read purity - read requests never mutate order statuses or DB state
     const dbData = await ensureDb();
-    let localOrders = dbData.orders || [];
-
-    const sb = getSupabaseAdmin();
-    if (sb) {
-      try {
-        let query = sb.from('orders').select('*').order('created_at', { ascending: false });
-        if (filter?.status && filter.status !== 'ALL') {
-          query = query.eq('status', filter.status);
-        }
-        const { data, error } = await query;
-        if (data && !error) {
-          const fromSb = data.map(mapRowToOrder);
-          // Bi-directional merge: Never omit any order that exists locally or in Supabase!
-          localOrders = mergeOrderLists(fromSb, localOrders);
-        }
-      } catch (err) {
-        console.warn('[DB] Supabase getOrders note:', err);
-      }
-    }
-
-    let list = localOrders;
+    let list = dbData.orders || [];
 
     if (filter?.userId || filter?.userEmail || filter?.userPhone) {
       list = list.filter((o) => {
@@ -1205,40 +531,6 @@ export const db = {
     // Task 13: Read purity - read requests never mutate order statuses or DB state
     const dbData = await ensureDb();
     const foundInMemory = (dbData.orders || []).find((o) => o.id === id);
-    const sb = getSupabaseAdmin();
-    if (sb) {
-      try {
-        const { data, error } = await sb.from('orders').select('*').eq('id', id).maybeSingle();
-        if (data && !error) {
-          const fromSb = mapRowToOrder(data);
-          const merged = normalizeOrderLinks({
-            ...foundInMemory,
-            ...fromSb,
-            payment: fromSb.payment || foundInMemory?.payment,
-            pricingExpiresAt: fromSb.pricingExpiresAt || foundInMemory?.pricingExpiresAt,
-            cancelledAt: fromSb.cancelledAt || foundInMemory?.cancelledAt,
-            cancelledBy: fromSb.cancelledBy || foundInMemory?.cancelledBy,
-            cancellationReason: fromSb.cancellationReason || foundInMemory?.cancellationReason,
-            isPriceLocked: fromSb.isPriceLocked ?? foundInMemory?.isPriceLocked,
-            exchangeRateUsed: fromSb.exchangeRateUsed ?? foundInMemory?.exchangeRateUsed,
-            profitMarginPercentUsed: fromSb.profitMarginPercentUsed ?? foundInMemory?.profitMarginPercentUsed,
-            lockedPricingSnapshot: fromSb.lockedPricingSnapshot ?? foundInMemory?.lockedPricingSnapshot,
-            auditLog: mergeAuditLogs(foundInMemory?.auditLog, fromSb.auditLog),
-          });
-          // Cache merged order in memory to guarantee immediate retrieval
-          if (foundInMemory) {
-            const idx = dbData.orders.findIndex((o) => o.id === id);
-            if (idx >= 0) dbData.orders[idx] = merged;
-          } else {
-            dbData.orders.unshift(merged);
-          }
-          return merged;
-        }
-      } catch (err) {
-        console.warn('[DB] Supabase getOrderById fallback:', err);
-      }
-    }
-
     return foundInMemory ? normalizeOrderLinks(foundInMemory) : undefined;
   },
 
@@ -1269,7 +561,6 @@ export const db = {
         data.orders.unshift(order);
       }
       await persistDb(data);
-      await syncOrderToSupabase(order);
       broadcastRealtimeEvent('ORDER_CREATED', { orderId: order.id, order });
       return order;
     });
@@ -1393,7 +684,6 @@ export const db = {
 
       data.orders[index] = updated;
       await persistDb(data);
-      await syncOrderToSupabase(updated);
       broadcastRealtimeEvent('ORDER_UPDATED', { orderId: updated.id, order: updated });
       return updated;
     });
@@ -1404,7 +694,6 @@ export const db = {
       const data = await ensureDb();
       const lenBefore = data.orders.length;
       data.orders = data.orders.filter((o) => o.id !== id);
-      await deleteOrderFromSupabase(id);
       if (data.orders.length !== lenBefore) {
         await persistDb(data);
         broadcastRealtimeEvent('ORDER_DELETED', { orderId: id });
@@ -1526,7 +815,6 @@ export const db = {
           };
           order.auditLog = mergeAuditLogs(order.auditLog, [auditEntry]);
           updatedCount++;
-          await syncOrderToSupabase(order);
           broadcastRealtimeEvent('ORDER_UPDATED', { orderId: order.id, order });
         }
       }
@@ -1569,7 +857,6 @@ export const db = {
           };
           order.auditLog = mergeAuditLogs(order.auditLog, [auditEntry]);
           removedCount++;
-          await syncOrderToSupabase(order);
           broadcastRealtimeEvent('ORDER_UPDATED', { orderId: order.id, order });
         }
       }
