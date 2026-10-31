@@ -40,3 +40,25 @@ Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/bui
 ## Self-hosted EC2 deployment
 
 See [deploy/EC2.md](deploy/EC2.md) for Ubuntu setup, PostgreSQL migration, Nginx, and admin account instructions. Run `sudo bash scripts/deploy-ec2.sh` from the cloned repository on the EC2 instance; the site will be served over HTTP on the EC2 public IP.
+
+### Create an admin account on EC2
+
+Connect to the EC2 instance over SSH as `root`, then run:
+
+```bash
+cd /opt/shein-concierge
+set -a
+source .env.production
+set +a
+sudo -u sheinapp --preserve-env=PGHOST,PGPORT,PGDATABASE,PGUSER,PGPASSWORD,PGPOOL_MAX \
+  bash -lc 'cd /opt/shein-concierge && npm run admin:create'
+```
+
+Enter the admin name and email when prompted, then enter a password with at least 12 characters. Password input is hidden. After `Admin account is ready` appears, restart the app so it reloads the user list from PostgreSQL:
+
+```bash
+sudo systemctl restart shein-concierge
+sudo systemctl status shein-concierge --no-pager
+```
+
+Then sign in at `http://<EC2-public-IPv4>/admin` with that email and password. If the account command stays open after printing the success message, the account has already been saved; press `Ctrl+C`, then run the restart commands above.

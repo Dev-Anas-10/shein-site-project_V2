@@ -21,11 +21,13 @@ async function readPassword() {
       const char = buffer.toString('utf8');
       if (char === '\u0003') {
         stdin.setRawMode(false);
+        stdin.pause();
         stdin.off('data', onData);
         stdout.write('\n');
         reject(new Error('Cancelled.'));
       } else if (char === '\r' || char === '\n') {
         stdin.setRawMode(false);
+        stdin.pause();
         stdin.off('data', onData);
         stdout.write('\n');
         resolve(value);
