@@ -8,7 +8,15 @@ export type GoogleProfile = {
   picture?: string;
 };
 
-type GoogleJwk = JsonWebKey & { kid?: string; alg?: string; use?: string };
+type GoogleJwk = {
+  [key: string]: unknown;
+  kid?: string;
+  alg?: string;
+  use?: string;
+  kty?: string;
+  n?: string;
+  e?: string;
+};
 
 let jwksCache: { keys: GoogleJwk[]; expiresAt: number } | null = null;
 
