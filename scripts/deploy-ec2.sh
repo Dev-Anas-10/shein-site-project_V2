@@ -114,8 +114,10 @@ SESSION_SECRET=${SESSION_SECRET}
 SESSION_COOKIE_SECURE=false
 NEXT_PUBLIC_GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
 EOF
-chown root:root "${APP_DIR}/.env.production"
-chmod 0600 "${APP_DIR}/.env.production"
+# Next.js reads .env.production during the build, which runs as APP_USER.
+# Keep secrets private from other users while allowing the service account to read them.
+chown "root:${APP_USER}" "${APP_DIR}/.env.production"
+chmod 0640 "${APP_DIR}/.env.production"
 
 set -a
 # shellcheck disable=SC1091
