@@ -15,10 +15,19 @@ SERVICE_NAME="shein-concierge"
 NGINX_SITE="/etc/nginx/sites-available/${SERVICE_NAME}"
 
 read -r -p "Domain name for this app (DNS A record must point to this EC2): " APP_DOMAIN
+# Accept either a bare hostname or a pasted URL, and remove accidental spaces.
+APP_DOMAIN="${APP_DOMAIN#"${APP_DOMAIN%%[![:space:]]*}"}"
+APP_DOMAIN="${APP_DOMAIN%"${APP_DOMAIN##*[![:space:]]}"}"
+case "${APP_DOMAIN,,}" in
+  http://*) APP_DOMAIN="${APP_DOMAIN:7}" ;;
+  https://*) APP_DOMAIN="${APP_DOMAIN:8}" ;;
+esac
+APP_DOMAIN="${APP_DOMAIN%%/*}"
 if [[ ! "${APP_DOMAIN}" =~ ^[A-Za-z0-9.-]+$ ]]; then
-  echo "Enter a domain name such as shop.example.com. HTTPS is required for secure login cookies." >&2
+  echo "Enter a domain such as shop.example.com, optionally prefixed with http:// or https://. HTTPS is required for secure login cookies." >&2
   exit 1
 fi
+echo "Using domain: ${APP_DOMAIN}"
 read -r -p "Google OAuth Web Client ID (leave blank to disable Google sign-in): " GOOGLE_CLIENT_ID
 read -r -p "Email address for the HTTPS certificate: " CERT_EMAIL
 if [[ ! "${CERT_EMAIL}" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]; then
