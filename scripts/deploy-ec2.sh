@@ -14,6 +14,38 @@ DB_USER="shein_app"
 SERVICE_NAME="shein-concierge"
 NGINX_SITE="/etc/nginx/sites-available/${SERVICE_NAME}"
 
+ensure_build_swap() {
+  local memory_kb swap_total_kb available_kb swap_file="/swapfile-shein-concierge"
+
+  memory_kb="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)"
+  swap_total_kb="$(awk 'NR > 1 { total += $3 } END { print total + 0 }' /proc/swaps)"
+
+  if (( memory_kb >= 2097152 || swap_total_kb >= 2097152 )); then
+    return 0
+  fi
+
+  if [[ ! -e "${swap_file}" ]]; then
+    available_kb="$(df -Pk / | awk 'NR == 2 { print $4 }')"
+    if (( available_kb < 2359296 )); then
+      echo "Less than 2.25 GiB is free on /; cannot safely create build swap." >&2
+      exit 1
+    fi
+
+    fallocate -l 2G "${swap_file}"
+    chmod 0600 "${swap_file}"
+    mkswap "${swap_file}" >/dev/null
+  fi
+
+  if ! awk -v path="${swap_file}" '$1 == path { found = 1 } END { exit !found }' /proc/swaps; then
+    swapon "${swap_file}"
+  fi
+  if ! grep -qF "${swap_file} none swap sw 0 0" /etc/fstab; then
+    printf '%s\n' "${swap_file} none swap sw 0 0" >> /etc/fstab
+  fi
+
+  echo "Enabled a 2 GiB swap file to support the production build on this low-memory instance."
+}
+
 read -r -p "EC2 public IPv4 address (or domain name): " APP_HOST
 # Accept a bare host or pasted URL, and remove accidental spaces.
 APP_HOST="${APP_HOST#"${APP_HOST%%[![:space:]]*}"}"
@@ -68,6 +100,7 @@ echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.co
   > /etc/apt/sources.list.d/nodesource.list
 apt-get update
 apt-get install -y nodejs
+ensure_build_swap
 
 if ! id -u "${APP_USER}" >/dev/null 2>&1; then
   useradd --system --home-dir "${APP_DIR}" --create-home --shell /usr/sbin/nologin "${APP_USER}"

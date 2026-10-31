@@ -17,7 +17,7 @@ This repository runs Next.js behind Nginx and stores its application state in a 
 4. At the first prompt, enter the EC2 public IPv4 address (for example `18.222.10.20`). The script also accepts a domain name or a URL such as `http://18.222.10.20`.
 5. When deployment finishes, open `http://<EC2-public-IPv4>`.
 
-The installer installs Node.js 22, PostgreSQL, and Nginx; creates a restricted PostgreSQL role; builds and starts the app; and creates an admin account with a password entered without echoing it to the terminal. It does not install Certbot or configure HTTPS.
+The installer installs Node.js 22, PostgreSQL, and Nginx; creates a restricted PostgreSQL role; builds and starts the app; and creates an admin account with a password entered without echoing it to the terminal. On instances with less than 2 GiB of RAM and swap, it creates a 2 GiB swap file for the production build. It does not install Certbot or configure HTTPS.
 
 ### HTTP login behavior
 
